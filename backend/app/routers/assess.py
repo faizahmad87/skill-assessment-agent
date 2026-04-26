@@ -10,9 +10,12 @@ from app.services.assessment_agent import (
     generate_first_question,
     generate_followup_question,
     generate_transition,
+    MAX_QUESTIONS_MAP,
 )
 
 router = APIRouter()
+
+MIN_QUESTIONS = 3  # always ask at least this many questions per skill
 
 
 @router.post("/api/assess/message")
@@ -24,8 +27,6 @@ async def send_message(request: AssessMessageRequest, db: DBSessionType = Depend
         raise HTTPException(status_code=400, detail="Assessment already complete")
 
     # Eagerly copy everything we need into plain Python values BEFORE the generator runs.
-    # The SQLAlchemy session closes after the HTTP response begins, so we must not access
-    # ORM attributes lazily inside the async generator.
     session_id = request.session_id
     seniority = db_session.seniority
     role_context = db_session.role_context
@@ -34,9 +35,11 @@ async def send_message(request: AssessMessageRequest, db: DBSessionType = Depend
     state = dict(db_session.assessment_state or {})
     current_skill: str = state.get("current_skill", "")
     skills_queue: list = list(state.get("skills_queue", []))
-    questions_asked: int = int(state.get("questions_asked", 0))
+    questions_asked: int = int(state.get("questions_asked", 1))
     conversation_history: list = list(state.get("conversation_history", []))
     skill_scores: dict = dict(state.get("skill_scores", {}))
+    skill_importance: dict = dict(state.get("skill_importance", {}))
+    skill_conversation_start: int = int(state.get("skill_conversation_start", 0))
 
     # Append user message to history and persist it immediately
     conversation_history.append({"role": "user", "content": request.message})
@@ -44,37 +47,55 @@ async def send_message(request: AssessMessageRequest, db: DBSessionType = Depend
     db.commit()
 
     async def generate():
-        nonlocal current_skill, skills_queue, questions_asked, conversation_history, skill_scores
+        nonlocal current_skill, skills_queue, questions_asked, conversation_history, skill_scores, skill_conversation_start
 
         # Open a fresh DB session for all writes inside the generator
         gen_db = SessionLocal()
         try:
-            # 1. Evaluate the answer for the current skill
+            # Determine importance and max questions for current skill
+            importance = skill_importance.get(current_skill, "standard")
+            max_q = MAX_QUESTIONS_MAP.get(importance, MIN_QUESTIONS)
+
+            # 1. Evaluate the answer
             evaluation = await evaluate_answer(
                 skill=current_skill,
                 conversation_history=conversation_history,
                 seniority=seniority,
+                skill_importance=importance,
+                questions_asked=questions_asked,
+                max_questions=max_q,
             )
             score = float(evaluation.get("score", 5.0))
             notes = evaluation.get("notes", "")
-            need_followup = evaluation.get("need_followup", False) and questions_asked < 2
+            need_followup = evaluation.get("need_followup", False)
 
             skill_scores[current_skill] = {"score": score, "notes": notes}
 
-            # 2. Decide next action and generate response text
-            if need_followup:
+            # 2. Decide next action
+            # Force follow-up if below minimum; allow extra if evaluator says so and below max
+            if questions_asked < MIN_QUESTIONS or (questions_asked < max_q and need_followup):
+                # Ask a follow-up question
+                skill_history = conversation_history[skill_conversation_start:]
                 response_text = await generate_followup_question(
                     skill=current_skill,
-                    last_answer=request.message,
+                    question_number=questions_asked + 1,
+                    max_questions=max_q,
+                    skill_conversation_history=skill_history,
                     role_context=role_context,
                     seniority=seniority,
+                    skill_importance=importance,
+                    current_score=score,
                 )
                 questions_asked += 1
                 is_complete = False
 
             elif skills_queue:
+                # Move to the next skill
                 next_skill = skills_queue[0]
                 skills_queue = skills_queue[1:]
+                next_importance = skill_importance.get(next_skill, "standard")
+                next_max_q = MAX_QUESTIONS_MAP.get(next_importance, MIN_QUESTIONS)
+
                 transition = await generate_transition(next_skill)
                 first_q = await generate_first_question(
                     skill=next_skill,
@@ -82,13 +103,17 @@ async def send_message(request: AssessMessageRequest, db: DBSessionType = Depend
                     role_context=role_context,
                     seniority=seniority,
                     recent_history=conversation_history[-4:],
+                    max_questions=next_max_q,
+                    skill_importance=next_importance,
                 )
                 response_text = f"{transition} {first_q}"
                 current_skill = next_skill
-                questions_asked = 0
+                questions_asked = 1  # first question of new skill
+                skill_conversation_start = len(conversation_history) + 1  # +1 for assistant message about to be added
                 is_complete = False
 
             else:
+                # All skills done
                 n = len(skill_scores)
                 response_text = (
                     f"That wraps up our assessment! I've evaluated your proficiency across "
@@ -120,6 +145,8 @@ async def send_message(request: AssessMessageRequest, db: DBSessionType = Depend
                     "questions_asked": questions_asked,
                     "conversation_history": conversation_history,
                     "skill_scores": skill_scores,
+                    "skill_importance": skill_importance,
+                    "skill_conversation_start": skill_conversation_start,
                 }
                 if is_complete:
                     sess.status = "complete"

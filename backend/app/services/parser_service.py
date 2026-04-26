@@ -27,13 +27,22 @@ Return JSON with this exact structure (no markdown, no code fences, pure JSON on
   "role_context": "brief description of the role",
   "candidate_skills": [
     {{"skill": "name", "years_experience": 2.5, "evidence": "used at X for Y"}}
-  ]
+  ],
+  "skill_importance": {{
+    "skill1": "critical",
+    "skill2": "important",
+    "skill3": "standard"
+  }}
 }}
 
 Rules:
-- Keep required_skills to 5-8 most important skills only
+- Keep required_skills to 5-8 most important skills only, ordered from most to least important
 - Only include skills truly required by the JD
 - Extract evidence from the resume for each candidate skill
+- For skill_importance, classify each required skill as:
+    "critical": Core to the role — mentioned multiple times, listed first, described as must-have/expert-level, or central to day-to-day responsibilities
+    "important": Clearly required but not the primary focus of the role
+    "standard": Required but mentioned briefly or as a supporting/secondary skill
 """
     messages = [SystemMessage(content=PARSER_SYSTEM_PROMPT), HumanMessage(content=prompt)]
     response = await llm.ainvoke(messages)

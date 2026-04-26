@@ -50,9 +50,11 @@ async def analyze(request: AnalyzeRequest, db: DBSessionType = Depends(get_db)):
     assessment_state = {
         "current_skill": required_skills[0],
         "skills_queue": required_skills[1:],
-        "questions_asked": 0,
+        "questions_asked": 1,  # first question counts; follow-ups start from Q2
         "conversation_history": [],
         "skill_scores": {},
+        "skill_importance": parsed.get("skill_importance", {}),
+        "skill_conversation_start": 0,  # index in conversation_history where current skill started
     }
 
     db_session = DBSession(
@@ -72,12 +74,19 @@ async def analyze(request: AnalyzeRequest, db: DBSessionType = Depends(get_db)):
     db.commit()
 
     # Generate opening question for the first skill
+    skill_importance = parsed.get("skill_importance", {})
+    max_questions_map = {"critical": 5, "important": 4, "standard": 3}
+    first_skill_importance = skill_importance.get(required_skills[0], "standard")
+    first_max_q = max_questions_map.get(first_skill_importance, 3)
+
     first_question = await generate_first_question(
         skill=required_skills[0],
         candidate_skills=candidate_skills,
         role_context=role_context,
         seniority=seniority,
         recent_history=[],
+        max_questions=first_max_q,
+        skill_importance=first_skill_importance,
     )
 
     # Save first question to conversation history and messages table
