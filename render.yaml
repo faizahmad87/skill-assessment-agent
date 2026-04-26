@@ -9,6 +9,6 @@ services:
       - key: GROQ_API_KEY
         sync: false
       - key: CORS_ORIGINS
-        value: https://your-vercel-app.vercel.app
+        value: https://skill-assessment-agent-nine.vercel.app
       - key: DATABASE_URL
         sync: false
