@@ -1,4 +1,5 @@
 import uuid
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session as DBSessionType
 import pdfplumber
@@ -10,6 +11,23 @@ from app.services.parser_service import parse_jd_and_resume
 from app.services.assessment_agent import generate_first_question
 
 router = APIRouter()
+
+
+def extract_text_from_file(file_bytes: bytes, filename: str) -> str:
+    """Extract plain text from PDF or DOCX file bytes."""
+    fname = filename.lower()
+    if fname.endswith(".pdf"):
+        text = ""
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            for page in pdf.pages:
+                text += page.extract_text() or ""
+        return text.strip()
+    elif fname.endswith(".docx") or fname.endswith(".doc"):
+        import docx
+        doc = docx.Document(io.BytesIO(file_bytes))
+        return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+    else:
+        raise ValueError(f"Unsupported file type: {filename}. Use PDF or DOCX.")
 
 
 @router.post("/api/analyze", response_model=AnalyzeResponse)
@@ -94,3 +112,43 @@ async def analyze_pdf(
     if not resume_text.strip():
         raise HTTPException(status_code=422, detail="Could not extract text from PDF")
     return await analyze(AnalyzeRequest(jd_text=jd_text, resume_text=resume_text), db)
+
+
+@router.post("/api/analyze/upload", response_model=AnalyzeResponse)
+async def analyze_upload(
+    jd_text: Optional[str] = Form(None),
+    jd_file: Optional[UploadFile] = File(None),
+    resume_text: Optional[str] = Form(None),
+    resume_file: Optional[UploadFile] = File(None),
+    db: DBSessionType = Depends(get_db),
+):
+    """Accept JD and/or Resume as text or file (PDF/DOCX), then run analysis."""
+    # Resolve JD
+    if jd_file and jd_file.filename:
+        content = await jd_file.read()
+        try:
+            final_jd = extract_text_from_file(content, jd_file.filename)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        if not final_jd:
+            raise HTTPException(status_code=422, detail="Could not extract text from JD file")
+    elif jd_text and jd_text.strip():
+        final_jd = jd_text.strip()
+    else:
+        raise HTTPException(status_code=422, detail="Provide jd_text or jd_file")
+
+    # Resolve Resume
+    if resume_file and resume_file.filename:
+        content = await resume_file.read()
+        try:
+            final_resume = extract_text_from_file(content, resume_file.filename)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        if not final_resume:
+            raise HTTPException(status_code=422, detail="Could not extract text from resume file")
+    elif resume_text and resume_text.strip():
+        final_resume = resume_text.strip()
+    else:
+        raise HTTPException(status_code=422, detail="Provide resume_text or resume_file")
+
+    return await analyze(AnalyzeRequest(jd_text=final_jd, resume_text=final_resume), db)

@@ -13,6 +13,33 @@ export async function analyzeInput(jdText: string, resumeText: string) {
   return res.json();
 }
 
+export async function analyzeWithFiles(
+  jdText: string,
+  resumeText: string,
+  jdFile: File | null,
+  resumeFile: File | null,
+) {
+  if (!jdFile && !resumeFile) {
+    return analyzeInput(jdText, resumeText);
+  }
+
+  const form = new FormData();
+  if (jdFile) form.append('jd_file', jdFile);
+  else form.append('jd_text', jdText);
+  if (resumeFile) form.append('resume_file', resumeFile);
+  else form.append('resume_text', resumeText);
+
+  const res = await fetch(`${API_URL}/api/analyze/upload`, {
+    method: 'POST',
+    body: form,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Analysis failed');
+  }
+  return res.json();
+}
+
 export async function* sendMessage(sessionId: string, message: string): AsyncGenerator<{ token: string; is_complete: boolean }> {
   const res = await fetch(`${API_URL}/api/assess/message`, {
     method: 'POST',
